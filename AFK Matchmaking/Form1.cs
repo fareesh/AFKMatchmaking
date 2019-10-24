@@ -1,16 +1,11 @@
 ﻿using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
 using System.Drawing;
-using System.Linq;
 using System.Text;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Threading;
-using SocketIOClient;
-using System.Collections.Specialized;
+using WebSocketSharp;
 using Microsoft.Win32;      
 
 
@@ -19,16 +14,15 @@ namespace AFK_Matchmaking
     public partial class Form1 : Form
     {
 
-        private String serverURL = "http://afk.fareesh.com:8080";
-        private String messageURL = "http://afk.fareesh.com:4567/message/send";
-        private Client socket;
+        private String serverURL = "ws://afkaccept.fareesh.com:7474";
+        private WebSocket socket;
         private String connectCode;
         private bool notification_sent;
         private IntPtr dotaWindow;
 
         /*Coordinates at 1920*/
-        private const int BUTTON_X = 750;
-        private const int BUTTON_Y = 517;
+        private const int BUTTON_X = 951;
+        private const int BUTTON_Y = 527;
 
 
         private Point getButtonCoordinates()
@@ -97,68 +91,71 @@ namespace AFK_Matchmaking
             lblCode.Text = "Your Code is: " + connectCode;
             notification_sent = false;
             setupWindowListener();
+            System.Diagnostics.Debug.WriteLine("Listener Setup Complete");
             setupSocket();
+        }
+
+        private void setActiveLabel(Object sender, EventArgs e)
+        {
+            lblNotifications.Text = "NOTIFICATIONS ENABLED: AFTER QUEUEING, ALT-TAB BACK TO THIS WINDOW AND KEEP IT IN FOCUS TO ENABLE NOTIFICATIONS";
+        }
+
+        private void setInactiveLabel(Object sender, EventArgs e)
+        {
+            lblNotifications.Text = "NOTIFICATIONS DISABLED: ALT-TAB BACK TO THIS WINDOW TO RECEIVE NOTIFICATIONS";
         }
 
         private void ClickOnPoint(IntPtr wndHandle, Point clientPoint)
         {
             Point oldPoint;
             GetCursorPos(out oldPoint);
-
-            /// get screen coordinates
             ClientToScreen(wndHandle, ref clientPoint);
-
-            /// set cursor on coords, and press mouse
             SetCursorPos(clientPoint.X, clientPoint.Y);
             mouse_event(0x00000002, 0, 0, 0, UIntPtr.Zero); /// left mouse button down
             mouse_event(0x00000004, 0, 0, 0, UIntPtr.Zero); /// left mouse button up
-
-            /// return mouse 
             SetCursorPos(oldPoint.X, oldPoint.Y);
         }
 
         private void setupSocket()
         {
-            socket = new Client(serverURL); // url to nodejs 
-            socket.Opened += SocketOpened;
-            socket.Message += SocketMessage;
-            socket.SocketConnectionClosed += SocketConnectionClosed;
-            socket.Error += SocketError;
-         
-            socket.On("connect", (fn) =>
+            System.Diagnostics.Debug.WriteLine("Connecting..");
+            socket = new WebSocket(serverURL);
+            socket.OnMessage += (sender, e) =>
             {
-                Console.WriteLine("Connected to Server");
-                socket.Emit("DeviceKey", connectCode);
-            });
+                System.Diagnostics.Debug.WriteLine("Message Received: " + e.Data);
+                phoneLabel.Text = "Accepting Match...";
+                if(e.Data == "ACCEPT")
+                {
+                    clickAccept();
+                }
+            };
+            
+            socket.OnOpen += (sender, e) =>
+            {
+                statusLabel.Text = "Status: Connected";
+                System.Diagnostics.Debug.WriteLine("Socket Opened");
+                socket.Send("{\"deviceKey\": \"" + connectCode + "\", \"messageType\": \"CONNECT\"}");
+            };
 
-            socket.On(connectCode, (data) =>
+            socket.OnClose += (sender, e) =>
             {
-                Console.WriteLine("Firing clickAccept for clicking the button!");
-                clickAccept();
-            });
+                statusLabel.Text = "Status: Not Connected";
+                setupSocket();
+            };
 
             socket.Connect();
+            System.Diagnostics.Debug.WriteLine("Connect fired");
         }
 
         private void clickAccept()
         {
-            Console.WriteLine("Setting Dotawindow " + dotaWindow.ToString() + " to foreground");
+            System.Diagnostics.Debug.WriteLine("Setting Dotawindow " + dotaWindow.ToString() + " to foreground");
             SetForegroundWindow(dotaWindow);
             Task.Factory.StartNew(() =>
             {
                 Thread.Sleep(3000);
                 ClickOnPoint(dotaWindow, getButtonCoordinates()); ClickOnPoint(dotaWindow, getButtonCoordinates());
-                try
-                {
-                    if (socket != null)
-                    {
-                        socket.Close();
-                    }
-                }
-                catch (Exception e)
-                {
-
-                }
+                phoneLabel.Text = "If you entered the code correctly, your phone will receive a notification when the match is ready";
                 notification_sent = false;
             });
         }
@@ -176,33 +173,26 @@ namespace AFK_Matchmaking
 
         private void SocketConnectionClosed(Object sender, EventArgs e)
         {
-
+            statusLabel.Text = "Status: Connection Closed";
         }
 
         private void SocketError(Object sender, EventArgs e)
         {
-
+            statusLabel.Text = "Status: Connection Error";
         }
 
 
 
         private void sendMessage()
         {
-            using (System.Net.WebClient client = new System.Net.WebClient())
-            {
-
-                byte[] response = client.UploadValues(messageURL, new NameValueCollection(){
-                    {"connectCode", connectCode}
-                });
-            }
-
+            socket.Send("{\"deviceKey\": \"" + connectCode + "\", \"messageType\": \"QUEUE\"}");
         }
 
         
 
         private void matchmakingPop()
         {
-            Console.WriteLine("Matchmaking Queue Ready");
+            System.Diagnostics.Debug.WriteLine("Matchmaking Queue Ready");
             if (!notification_sent)
             {
                 notification_sent = true;
@@ -210,9 +200,6 @@ namespace AFK_Matchmaking
                 sendMessage();
             }
         }
-
-
-
 
 
         protected override void WndProc(ref System.Windows.Forms.Message m)
@@ -228,23 +215,24 @@ namespace AFK_Matchmaking
 
                     default:
                         GetWindowText(handle, sb, sb.Capacity);
-                        if (sb.ToString().IndexOf("DOTA 2") >= 0 && m.WParam.ToInt32() == 6)
-                        {
-                            dotaWindow = handle;
-                            Task.Factory.StartNew(() =>
+                        if (sb.ToString().ToUpper().IndexOf("DOTA 2") >= 0)
+                            //System.Diagnostics.Debug.WriteLine("DOTA Window reports: " + m.WParam.ToInt32());
+                            if (m.WParam.ToInt32() == 32774)
                             {
-                                Thread.Sleep(3000);
-                                this.Invoke(new Action(() => matchmakingPop()));
-                            });
-                        }
+                                {
+                                    dotaWindow = handle;
+                                    Task.Factory.StartNew(() =>
+                                    {
+                                        Thread.Sleep(3000);
+                                        this.Invoke(new Action(() => matchmakingPop()));
+                                    });
+                                }
+                            }
                         break;
                 }
             }
             base.WndProc(ref m);
         }
-
-
-
 
 
         private void setupWindowListener()
@@ -254,10 +242,9 @@ namespace AFK_Matchmaking
         }
 
 
-
-
         private bool hasUpdate(){
             return false;
         }
+
     }
 }
